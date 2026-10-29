@@ -2,8 +2,8 @@
 enforced as deterministic checks outside the model's own reasoning, not as
 prompt text the model can ignore. This is a fixed safety boundary, same
 role as agents/base.py's client wiring or llm_provider/ -- it is NEVER part
-of the RSI-editable component tree (rsi/component_tree.py excludes it by
-construction, not by convention).
+of the RSI-editable component tree (rsi/harnesses.py's RESEARCH_HARNESS
+excludes it by construction, not by convention).
 
 Omnigent's ALLOW/ASK/DENY model is adopted as-is. ASK has no meaning in a
 batch/non-interactive pipeline (there is no approval UI), so it is treated

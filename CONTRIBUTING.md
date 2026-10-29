@@ -26,11 +26,17 @@ This is the one thing to understand before touching `agents/research/`:
 
 - **Fixed substrate** — `agents/research/gpt_researcher/`'s infrastructure
   (`llm_provider/`, `retrievers/`, `scraper/`, `document/`, `vector_store/`,
-  etc.), `agents/research/policies.py` (the hard guardrail layer), and
-  `agents/base.py`. Never proposed as an RSI edit, by construction — these
-  files aren't in any `HarnessSpec.allowed_files`. If you're adding a new
-  retriever or fixing a bug in the vendoring, you're working here, and
-  that's a normal PR.
+  etc.), `agents/research/policies.py` (the hard guardrail layer),
+  `agents/base.py`, and **all of `cortex/`**. Never proposed as an RSI
+  edit, by construction — these files aren't in any
+  `HarnessSpec.allowed_files`, for any harness. `cortex/` specifically is
+  excluded from *every* harness's component tree on purpose, not just left
+  off by oversight: it's shared across every harness at once, so an edit
+  benchmarked against only one harness's benchmark could silently change
+  memory behavior for the others with nothing to catch it. If you're
+  adding a new retriever, fixing a vendoring bug, or tuning Cortex's decay/
+  reinforcement constants, you're working here, and that's a normal PR —
+  just not something RSI proposes on its own.
 - **Strategy surface** — `agents/research/gpt_researcher/prompts.py`,
   `query_processing.py`, `researcher.py`, `writer.py`, `curator.py`,
   `report_generation.py`, `agent_creator.py`, `retriever.py`,

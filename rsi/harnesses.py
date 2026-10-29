@@ -27,15 +27,17 @@ CODING_HARNESS = HarnessSpec(
             description="Planner/Coder/Debugger/Reviewer prompts and the orchestration constants "
                         "(MAX_DEBUGGER_ATTEMPTS).",
         ),
-        Component(
-            id="c2", name="cortex_mechanics",
-            files=["cortex/graph.py", "cortex/replay.py"],
-            description="Groove-graph decay/reinforcement tuning and sleep-replay consolidation logic.",
-        ),
     ],
     benchmark_fn=coding_benchmark.run_benchmark,
     cortex_domain="coding",
 )
+# cortex/ is deliberately absent from every harness's component_tree, for both harnesses
+# here and any third-party one -- it's shared, fixed substrate (same role as
+# agents/base.py / llm_provider/), never RSI-editable. Cortex is used by every harness
+# at once; an edit benchmarked against only one harness's benchmark could silently
+# change memory behavior for all the others with nothing to catch it -- same class of
+# cross-consumer blast-radius problem the fintrack exercise surfaced for the vendored
+# harness files, so the fix is the same: don't let it be edited at all.
 
 RESEARCH_HARNESS = HarnessSpec(
     name="research",
