@@ -1,57 +1,33 @@
 """Proposer -- both RSI tiers' edit-proposal logic (docs/05_rsi_harness2_design_spec.md
-S3/S4). Harnessing-level reads a Cortex trace report; task-level reads the
-current episode's Grader mistake list. Same JSON contract either way,
-Qwen-backed via GenericLLMProvider directly (same pattern as
-agents/research/reflection.py) instead of the coding harness's
-agents.base.Agent (Claude-only) -- selfmod.meta_agent's Claude dependency is
-exactly why this is a separate module, not a shared one (see docs/05 S0).
+S3/S4). Originally two separate implementations: selfmod/meta_agent.py
+(Claude-only, coding harness) and this module (Qwen-only, research harness).
+Unified around an injected `llm_call` (rsi/llm_adapters.py) so this module
+has no provider-specific knowledge at all -- a HarnessSpec plus any
+llm_call works, for any repo.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import agents.research  # noqa: F401 -- side effect: puts gpt_researcher on sys.path
-from gpt_researcher.llm_provider.generic import GenericLLMProvider
-
-from .component_tree import ALLOWED_FILES, COMPONENT_TREE
+from .harness_spec import Component, HarnessSpec
+from .llm_adapters import LLMCall
 
 MAX_EDITS_PER_CYCLE = 3
 MAX_EDIT_CHARS = 4000
-
-_RULES = f"""Rules:
-- Propose at most {MAX_EDITS_PER_CYCLE} edits. Fewer, sharper edits beat many.
-- Each edit is an exact (old_string, new_string) replacement. old_string must \
-appear VERBATIM and EXACTLY ONCE in the target file (including whitespace/indentation).
-- You may ONLY propose edits to files in the allowlist given below.
-- Ground every edit in something specific from the report/trajectory you were given \
--- state the hypothesis in `rationale`.
-- Prefer the smallest change that tests the hypothesis: a tuned constant, a sentence \
-added to a prompt -- not a rewrite of a whole function.
-- If nothing is worth changing, return an empty edits list.
-
-Respond with ONLY a single JSON object, no prose, no markdown fence:
-{{"summary": "<one sentence>", "edits": [{{"file": "...", "rationale": "...", \
-"old_string": "...", "new_string": "..."}}]}}
-"""
-
-HARNESSING_SYSTEM_PROMPT = (
-    "You are the Harnessing-level Proposer for a deep-research agent harness "
-    "(GPT Researcher, Qwen-backed). You read a trace report of its recent "
-    "real-world performance across many episodes and propose small, targeted "
-    "edits to improve it going forward.\n\n" + _RULES
-)
-
-TASK_SYSTEM_PROMPT = (
-    "You are the Task-level Proposer for a deep-research agent harness. A single "
-    "episode's Grader keeps finding the same category of mistake across revision "
-    "rounds. Propose a small edit, scoped to fixing that one mistake pattern for "
-    "the rest of THIS episode -- not a general improvement.\n\n" + _RULES
-)
+MAX_FILE_CHARS = 1200  # see docs/01_harness_spec.md S6 Q4 / docs/05 S6 Q4 -- binary-
+# searched live against a local Ollama/qwen3:14b setup: an ~8KB prompt returns valid
+# JSON, an ~20KB prompt returns a coherent but wrong-format free-form essay instead
+# (the model stays on-topic, it just drops the JSON-only instruction -- not garbling).
+# Kept conservative so the engine works out of the box against small local models; a
+# consumer with a larger-context setup (hosted API, or a bigger Ollama num_ctx) can
+# raise this safely. Truncation is always safe regardless: apply_edits() validates
+# old_string against the REAL, untruncated file at apply time, so a model proposing
+# an edit against content it couldn't see just gets a clean rejection, never a
+# silently-wrong edit.
 
 
 @dataclass
@@ -69,6 +45,45 @@ class SelfEditPlan:
     parse_error: str | None = None
 
 
+_RULES = f"""Rules:
+- Propose at most {MAX_EDITS_PER_CYCLE} edits per cycle. Fewer, sharper edits beat many.
+- Each edit is an exact (old_string, new_string) replacement. old_string must \
+appear VERBATIM and EXACTLY ONCE in the target file (including whitespace/indentation) \
+-- copy it character-for-character from the file content you were given.
+- You may ONLY propose edits to files in the allowlist given below. Never propose \
+edits to tests, benchmarks, or the self-improvement engine itself.
+- Ground every edit in something specific from the report/trajectory you were given \
+-- state the hypothesis ("this should reduce X because Y") in `rationale`.
+- Prefer the smallest change that tests the hypothesis: a tuned constant, a sentence \
+added to a prompt -- not a rewrite of a whole function.
+- If nothing is worth changing, return an empty edits list rather than inventing busywork.
+
+Respond with ONLY a single JSON object, no prose before or after, no markdown fence:
+{{"summary": "<one sentence>", "edits": [{{"file": "...", "rationale": "...", \
+"old_string": "...", "new_string": "..."}}]}}
+"""
+
+
+def _harnessing_system_prompt(harness: HarnessSpec) -> str:
+    files = "\n".join(f"- {f}" for f in harness.allowed_files)
+    return (
+        f"You are the Harnessing-level Proposer for {harness.description}. "
+        "You read a trace report of its recent real-world performance across many "
+        "episodes and propose small, targeted edits to improve it going forward.\n\n"
+        f"You may ONLY propose edits to these files:\n{files}\n\n" + _RULES
+    )
+
+
+def _task_system_prompt(component: Component) -> str:
+    files = "\n".join(f"- {f}" for f in component.files)
+    return (
+        "You are the Task-level Proposer. A single episode keeps running into the same "
+        "category of mistake. Propose a small edit, scoped to fixing that one mistake "
+        "pattern for the rest of THIS episode -- not a general improvement.\n\n"
+        f"You may ONLY propose edits to these files:\n{files}\n\n" + _RULES
+    )
+
+
 def _extract_json(text: str) -> dict | None:
     fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     candidate = fence.group(1) if fence else text.strip()
@@ -84,7 +99,7 @@ def _extract_json(text: str) -> dict | None:
             return None
 
 
-def _build_plan(text: str) -> SelfEditPlan:
+def _build_plan(text: str, allowed_files: list[str]) -> SelfEditPlan:
     data = _extract_json(text)
     if data is None:
         return SelfEditPlan(summary="skipped: planner response was not valid JSON",
@@ -96,7 +111,7 @@ def _build_plan(text: str) -> SelfEditPlan:
             file, rationale, old, new = e["file"], e["rationale"], e["old_string"], e["new_string"]
         except (KeyError, TypeError):
             continue
-        if file not in ALLOWED_FILES:
+        if file not in allowed_files:
             continue
         if not old.strip() or len(old) > MAX_EDIT_CHARS or len(new) > MAX_EDIT_CHARS:
             continue
@@ -104,31 +119,7 @@ def _build_plan(text: str) -> SelfEditPlan:
     return SelfEditPlan(summary=data.get("summary", ""), edits=edits)
 
 
-async def _call(system: str, user: str, tier: str = "STRATEGIC_LLM") -> str:
-    llm_str = os.environ.get(tier)
-    if not llm_str:
-        return ""
-    provider, model = llm_str.split(":", 1)
-    llm = GenericLLMProvider.from_provider(provider, model=model, temperature=0.3, verbose=False)
-    return await llm.get_chat_response(
-        [{"role": "system", "content": system}, {"role": "user", "content": user}], stream=False,
-    )
-
-
-MAX_FILE_CHARS = 1200  # see docs/05 S6 Q4 -- binary-searched live against this project's
-# actual local Ollama/qwen3:14b setup: ~8KB total prompt produces valid JSON, ~20KB
-# produces a coherent but wrong-format free-form essay instead (not garbling -- the model
-# is on-topic, just drops the JSON-only instruction). That gap points at Ollama's default
-# ~4096-token context window for this model (qwen3 natively supports far more; this is a
-# serving-default limitation, not a model-capability one) -- see docs/01_harness_spec.md
-# S6 Q4 for how to raise it (OLLAMA_CONTEXT_LENGTH or a custom Modelfile num_ctx). Until
-# that's done, keep our own prompt small enough to reliably fit under the default.
-# Truncation here is safe: apply_edits() validates old_string against the REAL, untruncated
-# file at apply time, so a model proposing an edit against content it couldn't see just
-# gets a clean "old_string occurs 0 times" rejection, never a silently-wrong edit.
-
-
-def _render_component_files(repo_root: Path, files: list[str]) -> str:
+def _render_files(repo_root: Path, files: list[str]) -> str:
     sections = []
     for rel_path in files:
         content = (repo_root / rel_path).read_text()
@@ -138,35 +129,39 @@ def _render_component_files(repo_root: Path, files: list[str]) -> str:
     return "\n\n".join(sections)
 
 
-async def propose_from_report(repo_root: Path, report_text: str, lineage_history_text: str) -> SelfEditPlan:
+async def propose_from_report(
+    repo_root: Path, harness: HarnessSpec, llm_call: LLMCall, report_text: str, lineage_history_text: str,
+) -> SelfEditPlan:
     """Harnessing-level: cross-episode Cortex trace report -> candidate edit."""
-    file_sections = _render_component_files(repo_root, ALLOWED_FILES)
+    file_sections = _render_files(repo_root, harness.allowed_files)
     prompt = (
-        f"## Trace report (real production episodes, domain=research)\n{report_text}\n\n"
-        f"## Lineage history (prior self-improvement cycles)\n{lineage_history_text}\n\n"
-        f"## Allowlisted files you may edit\n{', '.join(ALLOWED_FILES)}\n\n"
+        f"## Trace report (real production episodes, domain={harness.cortex_domain})\n{report_text}\n\n"
+        f"## Lineage history (prior self-improvement cycles for this harness)\n{lineage_history_text}\n\n"
+        f"## Allowlisted files you may edit\n{', '.join(harness.allowed_files)}\n\n"
         f"## Current source\n{file_sections}\n\nPropose this cycle's edit plan."
     )
-    text = await _call(HARNESSING_SYSTEM_PROMPT, prompt)
+    text = await llm_call(_harnessing_system_prompt(harness), prompt)
     if not text:
-        return SelfEditPlan(summary="skipped: dry-run (no QWEN_API_KEY)", edits=[], parse_error="dry_run")
-    return _build_plan(text)
+        return SelfEditPlan(summary="skipped: dry-run (no LLM credentials configured)",
+                             edits=[], parse_error="dry_run")
+    return _build_plan(text, harness.allowed_files)
 
 
-async def propose_from_trajectory(repo_root: Path, mistakes: list[str], component_id: str = "c1") -> SelfEditPlan:
-    """Task-level: this episode's repeated Grader mistakes -> candidate edit,
-    scoped by default to c1 (system_prompt) since a repeated mistake category
-    is most often a missing/weak instruction, not a tool or orchestration bug.
-    """
-    component = next((c for c in COMPONENT_TREE if c.id == component_id), COMPONENT_TREE[0])
-    file_sections = _render_component_files(repo_root, component.files)
+async def propose_from_trajectory(
+    repo_root: Path, harness: HarnessSpec, llm_call: LLMCall, mistakes: list[str], component_id: str | None = None,
+) -> SelfEditPlan:
+    """Task-level: this episode's repeated mistakes -> candidate edit, scoped
+    to one component (defaults to the harness's first declared component)."""
+    component = next((c for c in harness.component_tree if c.id == component_id), harness.component_tree[0])
+    file_sections = _render_files(repo_root, component.files)
     mistakes_text = "\n".join(f"- {m}" for m in mistakes)
     prompt = (
         f"## Repeated mistakes this episode\n{mistakes_text}\n\n"
         f"## Allowlisted files you may edit\n{', '.join(component.files)}\n\n"
         f"## Current source\n{file_sections}\n\nPropose a scoped fix for this episode."
     )
-    text = await _call(TASK_SYSTEM_PROMPT, prompt)
+    text = await llm_call(_task_system_prompt(component), prompt)
     if not text:
-        return SelfEditPlan(summary="skipped: dry-run (no QWEN_API_KEY)", edits=[], parse_error="dry_run")
-    return _build_plan(text)
+        return SelfEditPlan(summary="skipped: dry-run (no LLM credentials configured)",
+                             edits=[], parse_error="dry_run")
+    return _build_plan(text, component.files)

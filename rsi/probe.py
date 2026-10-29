@@ -1,17 +1,11 @@
-"""Probe -- runs a candidate edit and reports what happened, for both RSI
-tiers. Never decides accept/reject itself (that's composer.py).
+"""Probe -- runs a candidate edit and reports what happened. Never decides
+accept/reject itself (that's composer.py).
 
 Harnessing-level: apply the edit in an isolated git worktree, run the
-Cortex sanity suite, run the ground-truth benchmark on baseline vs
-candidate -- same git-worktree mechanics as selfmod/executor.py, ported
-rather than shared (docs/05_rsi_harness2_design_spec.md S0: separate
-modules on purpose, since selfmod is Claude-only and this is Qwen-only).
+Cortex sanity suite, run the harness's own ground-truth benchmark
+(HarnessSpec.benchmark_fn) on baseline vs candidate.
 
-Task-level: re-run just write_report()+Grader (not the whole research
-phase) with the candidate edit applied in-process, and compare mistake
-counts against the unedited baseline for the SAME draft -- no git worktree
-needed since nothing here touches disk-persisted harness state, and no
-ground truth needed since this is a same-task behavioral contrast.
+Task-level: deliberately not implemented -- see task_probe_not_implemented().
 """
 
 from __future__ import annotations
@@ -21,8 +15,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .harness_spec import BenchmarkFn, ScoreLike
 from .proposer import ProposedEdit
-from .research_benchmark import BenchmarkScore, run_benchmark
 
 
 def _run_git(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
@@ -70,25 +64,23 @@ def run_sanity_suite(worktree: Path, python_bin: str) -> tuple[bool, str]:
 
 @dataclass
 class HarnessingProbeResult:
-    applied: list[str]
-    skipped: list[str]
     tests_ok: bool
     test_output: str
-    baseline_score: BenchmarkScore | None = None
-    candidate_score: BenchmarkScore | None = None
+    baseline_score: ScoreLike | None = None
+    candidate_score: ScoreLike | None = None
 
 
 def harnessing_probe(
-    repo_root: Path, baseline_wt: Path, candidate_wt: Path, python_bin: str,
+    baseline_wt: Path, candidate_wt: Path, python_bin: str, benchmark_fn: BenchmarkFn,
 ) -> HarnessingProbeResult:
     """Caller is responsible for creating/tearing down the two worktrees --
     this just applies tests+benchmark to whatever is already staged in each."""
     tests_ok, test_output = run_sanity_suite(candidate_wt, python_bin)
     if not tests_ok:
-        return HarnessingProbeResult(applied=[], skipped=[], tests_ok=False, test_output=test_output)
-    baseline_score = run_benchmark(baseline_wt, python_bin)
-    candidate_score = run_benchmark(candidate_wt, python_bin)
-    return HarnessingProbeResult(applied=[], skipped=[], tests_ok=True, test_output="",
+        return HarnessingProbeResult(tests_ok=False, test_output=test_output)
+    baseline_score = benchmark_fn(baseline_wt, python_bin)
+    candidate_score = benchmark_fn(candidate_wt, python_bin)
+    return HarnessingProbeResult(tests_ok=True, test_output="",
                                   baseline_score=baseline_score, candidate_score=candidate_score)
 
 

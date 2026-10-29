@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "self-healing-ai"
+version = "0.1.0"
+description = "Cortex memory + a research/coding agent harness + a generic RSI self-improvement engine"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+authors = [{ name = "Akhilesh Paspureddi" }]
+
+# Lower bounds, not the exact pins in requirements.txt (that file is a full
+# resolved-environment freeze for this repo's own dev venv, not a dependency
+# spec for consumers -- see docs/01_harness_spec.md and the "publishing as a
+# general package" design notes). Only two upper-bound constraints are kept
+# explicit, and only because they're genuinely load-bearing:
+#   - numpy<2.5.0: the vendored GPT Researcher tree (agents/research/gpt_researcher/,
+#     not a pip dependency, so nothing else declares this for us) requires it.
+#   - packaging<26.0.0 is NOT listed here on purpose: langchain-core already
+#     declares that constraint itself, so pip's resolver enforces it
+#     automatically without us re-asserting it and risking a stricter bound
+#     than langchain-core's own.
+dependencies = [
+    "anthropic>=0.112.0",
+    "chromadb>=1.5.9",
+    "networkx>=3.6.1",
+    "numpy>=2.0.0,<2.5.0",
+    "pydantic>=2.13.4",
+    "aiofiles>=24.1.0",
+    "arxiv>=2.1.3",
+    "beautifulsoup4>=4.13.3",
+    "colorama>=0.4.6",
+    "ddgs>=9.16.1",
+    "json-repair>=0.30.3",
+    "langchain>=1.0.3",
+    "langchain-classic>=1.0.0",
+    "langchain-community>=0.4.1",
+    "langchain-core>=1.0.4",
+    "langchain-openai>=1.0.2",
+    "langchain-text-splitters>=1.0.0",
+    "lxml>=6.1.3",
+    "markdown>=3.7",
+    "primp>=2.0.1",
+    "requests>=2.32.5",
+    "tiktoken>=0.14.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ap48579/self_healing_ai"
+
+[tool.setuptools.packages.find]
+include = ["cortex*", "agents*", "rsi*"]
+exclude = ["tests*"]
+
+[tool.setuptools]
+py-modules = ["pipeline", "research_pipeline"]

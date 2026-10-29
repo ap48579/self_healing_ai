@@ -9,6 +9,20 @@ yet (one real episode so far, zero revisions). A policy layer
 this as the fixed, never-RSI-edited safety boundary — see
 docs/01_harness_spec.md S5.
 
+**Superseded in one respect, while building this generally for other
+projects/the public**: S0 and S4 below say `selfmod/` stays separate from
+`rsi/` "not a shared module." That held while this engine only served
+self_healing_ai's own two harnesses; it no longer does. `selfmod/` and
+`rsi/` are now unified into one generic engine living in `rsi/`
+(`HarnessSpec` + an injected `llm_call`, see `rsi/harness_spec.py` and
+`rsi/llm_adapters.py`) — the coding harness is just another `HarnessSpec`
+now, Claude-backed via `claude_llm_call()`, rather than a separate
+`selfmod/meta_agent.py` implementation. The reasoning below for why they
+were separate is left as-is, as the historical record of why that was the
+right call *at the time* — it stopped being the right call once a third
+consumer (anyone doing `pip install self-healing-ai`) became the actual
+design target, not a hypothetical.
+
 ## 0. What "design adoption" means here, precisely
 
 We do **not** depend on the `harness2` Python package. It's Python 3.12/`uv`
@@ -171,8 +185,12 @@ rsi/
 ```
 
 Wired into `cli.py --self-improve --harness research` (async, since
-`propose_from_report` is a coroutine). `selfmod/` stays exactly as it was,
-serving only the coding harness — confirmed no changes needed there.
+`propose_from_report` is a coroutine). **Update, see the status note at
+the top of this doc**: `selfmod/` was later retired and unified into this
+same `rsi/` package once the engine needed to serve arbitrary third-party
+consumers, not just this repo's own two harnesses — `cli.py
+--self-improve --harness coding` now goes through the identical
+`rsi.run_cycle()` too.
 
 ## 6. Open questions
 

@@ -1,16 +1,29 @@
-from .component_tree import ALLOWED_FILES, COMPONENT_TREE, Component
-from .composer import CycleResult, LINEAGE_BRANCH, run_cycle
+from .composer import CycleResult, lineage_branch, run_cycle
+from .harness_spec import BenchmarkFn, Component, HarnessSpec, ScoreLike
+from .harnesses import CODING_HARNESS, HARNESSES, LLM_CALL_FACTORIES, RESEARCH_HARNESS
+from .llm_adapters import LLMCall, claude_llm_call, qwen_ollama_llm_call
 from .proposer import ProposedEdit, SelfEditPlan, propose_from_report, propose_from_trajectory
+from .tracer import SelfImprovementReport, build_report
 
 __all__ = [
-    "ALLOWED_FILES",
-    "COMPONENT_TREE",
-    "Component",
     "CycleResult",
-    "LINEAGE_BRANCH",
+    "lineage_branch",
     "run_cycle",
+    "BenchmarkFn",
+    "Component",
+    "HarnessSpec",
+    "ScoreLike",
+    "CODING_HARNESS",
+    "RESEARCH_HARNESS",
+    "HARNESSES",
+    "LLM_CALL_FACTORIES",
+    "LLMCall",
+    "claude_llm_call",
+    "qwen_ollama_llm_call",
     "ProposedEdit",
     "SelfEditPlan",
     "propose_from_report",
     "propose_from_trajectory",
+    "SelfImprovementReport",
+    "build_report",
 ]

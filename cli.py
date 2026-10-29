@@ -31,9 +31,9 @@ def main():
     parser.add_argument("--self-improve", action="store_true",
                          help="Run self-improvement cycle(s) against a harness's lineage branch and exit")
     parser.add_argument("--harness", default="coding", choices=["coding", "research"],
-                         help="Which harness to self-improve: 'coding' uses selfmod/ (Claude-backed), "
-                              "'research' uses rsi/ (Qwen-backed, Harness²-design-adopted, see "
-                              "docs/05_rsi_harness2_design_spec.md)")
+                         help="Which harness to self-improve via the unified rsi/ engine -- "
+                              "'coding' is Claude-backed, 'research' is Qwen/Ollama-backed, see "
+                              "docs/05_rsi_harness2_design_spec.md")
     parser.add_argument("--cycles", type=int, default=1, help="Number of cycles with --self-improve")
     args = parser.parse_args()
 
@@ -45,10 +45,19 @@ def main():
 
     if args.self_improve:
         repo_root = Path(__file__).parent
+        from rsi import HARNESSES, LLM_CALL_FACTORIES, run_cycle
 
-        def _print_cycle(name: str, result) -> None:
+        harness = HARNESSES[args.harness]
+        env_key = "ANTHROPIC_API_KEY" if args.harness == "coding" else "QWEN_API_KEY"
+        if not os.environ.get(env_key):
+            print(f"WARNING: {env_key} is not set — the proposer will get a dry-run "
+                  "placeholder response and every cycle will be skipped.\n", file=sys.stderr)
+        llm_call = LLM_CALL_FACTORIES[args.harness]()
+
+        for _ in range(args.cycles):
+            result = asyncio.run(run_cycle(repo_root, harness, llm_call, cortex_dir=args.cortex_dir))
             print(f"\n{'='*60}")
-            print(f"[{name}] Generation {result.generation}: {result.status.upper()}")
+            print(f"[{harness.name}] Generation {result.generation}: {result.status.upper()}")
             print(f"Summary: {result.summary}")
             if result.baseline_score is not None:
                 print(f"Score: baseline={result.baseline_score:.1f} candidate={result.candidate_score:.1f}")
@@ -57,23 +66,6 @@ def main():
             if result.detail:
                 print(f"Detail: {result.detail[:500]}")
             print(f"{'='*60}\n")
-
-        if args.harness == "coding":
-            if not os.environ.get("ANTHROPIC_API_KEY"):
-                print("WARNING: ANTHROPIC_API_KEY is not set — the planner will get a dry-run "
-                      "placeholder response and every cycle will be skipped.\n", file=sys.stderr)
-            from selfmod import HARNESSES, run_cycle
-            harness = HARNESSES["coding"]
-            for _ in range(args.cycles):
-                _print_cycle("coding", run_cycle(repo_root, harness, cortex_dir=args.cortex_dir))
-        else:
-            if not os.environ.get("QWEN_API_KEY"):
-                print("WARNING: QWEN_API_KEY is not set — the proposer will get a dry-run "
-                      "placeholder response and every cycle will be skipped.\n", file=sys.stderr)
-            from rsi import run_cycle
-            for _ in range(args.cycles):
-                result = asyncio.run(run_cycle(repo_root, cortex_dir=args.cortex_dir))
-                _print_cycle("research", result)
         return
 
     if not args.task:

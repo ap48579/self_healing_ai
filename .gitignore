@@ -5,8 +5,9 @@ __pycache__/
 .DS_Store
 cortex_data/
 workspace/
-selfmod_data/worktrees/
-selfmod_data/logs/
 rsi_data/worktrees/
 notebook_trace_data/
 test_cortex_data/
+*.egg-info/
+build/
+dist/

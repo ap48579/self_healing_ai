@@ -1,69 +1,103 @@
-# Self-Healing Coding Agent + Cortex — Working MVP
+# self-healing-ai
 
-Implements the core integration of `coding_agent_plan.md` and
-`cortex_reasoning.md` end-to-end: a real agent pipeline, wired to a real
-Cortex memory store, verified to run without crashing.
+A memory system, an agent harness, and a self-improvement engine, designed
+to be used together or separately:
 
-## What's fully built and tested
+- **`cortex/`** — cross-episode memory for an agent. Recall (literal
+  similarity), Intuition (structural patterns), Caution (known dead ends),
+  Instinct (reinforced heuristics promoted after repeated confirmation) —
+  backed by ChromaDB + a SQLite-persisted "groove" graph with Hebbian
+  reinforcement and time-based decay. Fully domain-agnostic: point it at
+  any project via `persist_dir` + `Episode.domain`/`scope`.
+- **`agents/`** — two working harnesses built on it: a self-healing coding
+  agent (`pipeline.py`, Claude-backed) and an autonomous deep-research
+  agent (`research_pipeline.py`, vendoring GPT Researcher, configured for
+  local Ollama or DashScope via `agents/research/qwen_config.py`).
+- **`rsi/`** — a generic recursive self-improvement engine. Any harness —
+  these two, or your own — gets its own git lineage branch, its own
+  ground-truth benchmark, and its own ALLOW/ASK/DENY-style hard guardrail
+  boundary (`agents/research/policies.py`) that no proposed edit can
+  cross. Design: `docs/05_rsi_harness2_design_spec.md`.
 
-- **Cortex core** (`cortex/`) — schema, ChromaDB-backed Recall/Intuition/
-  Caution/Instinct indices, the groove-weighted memory graph (NetworkX),
-  spreading activation, decay, and Sleep-like Consolidation Replay
-  (cluster → model-compare → merge/reject → promote to Instinct).
-  **Fully tested standalone, no API key required** — `python -m tests.test_cortex`.
-- **Agent pipeline** (`agents/`, `pipeline.py`) — Planner, Coder, Tester
-  (mechanical, zero thinking), Debugger (escalating effort + parallel
-  hypotheses), Reviewer, Learning Agent. Wired end-to-end through
-  `cli.py`. Verified to run without crashing in dry-run mode (no API key) —
-  exercises the full failure/Debugger-loop path correctly.
+Design rationale for the whole project lives in `docs/01` through `docs/05`
+— each one documents what was built, what was tried and abandoned, and why,
+as the project evolved.
 
-## What's deliberately scoped down for this MVP
-
-- **Context Builder** is a stub (lists workspace files). Real codebase
-  reading is the most natural next extension.
-- **Complexity scoring** is a crude word-count heuristic, not the full
-  signal described in the plan (past episode healer-attempt counts aren't
-  wired into it yet).
-- **Debugger's "parallel hypotheses"** run sequentially in this MVP, not
-  concurrently — same logic, straightforward upgrade to `asyncio`/threads later.
-- **Layered compression Tier 3** (raw original, reversible cache) isn't
-  implemented — Tier 1 (`distilled_learnings`) and Tier 2 (full structured
-  arc, in `episodes.jsonl`) are real.
-- **Sleep-like Replay** is callable on demand (`cortex.run_replay`), not
-  yet wired to idle-detection scheduling — that's a deployment concern.
-- **No sandboxing** — Tester runs generated code via direct `subprocess`,
-  not Docker/E2B. Fine for trusted local use; revisit before running
-  untrusted tasks.
-
-## Setup
+## Install
 
 ```bash
+git clone https://github.com/ap48579/self_healing_ai.git
 cd self_healing_ai
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-...   # omit to run in dry-run mode
 ```
 
-## Run
+To use it as a dependency from another project instead:
 
 ```bash
+pip install "self-healing-ai @ git+https://github.com/ap48579/self_healing_ai.git"
+# or, for local development against a clone:
+pip install -e /path/to/self_healing_ai
+```
+
+## Quickstart
+
+```bash
+# Coding agent (needs ANTHROPIC_API_KEY; omit it to run in dry-run mode)
+export ANTHROPIC_API_KEY=sk-...
 python cli.py "write a function that returns the nth fibonacci number"
-python cli.py --stats   # Cortex memory stats
+
+# Research agent (needs QWEN_API_KEY; QWEN_BASE_URL + QWEN_MODEL for a
+# self-hosted/Ollama endpoint, or just QWEN_API_KEY for DashScope)
+export QWEN_API_KEY=ollama QWEN_BASE_URL=http://localhost:11434/v1 QWEN_MODEL=qwen3:14b
+python cli.py --research "What is the boiling point of water in Celsius at sea level?"
+
+# Cortex memory stats
+python cli.py --stats
+
+# Run a self-improvement cycle against one of the two built-in harnesses
+python cli.py --self-improve --harness research
+python cli.py --self-improve --harness coding
 ```
 
-Without `ANTHROPIC_API_KEY` set, agents return placeholder text instead of
-real completions — useful for verifying the pipeline wiring, not for real
-coding tasks. The Debugger loop, Tester, and Cortex write-back all still
-run for real in dry-run mode; only the LLM calls are stubbed.
+## Using the research harness in your own project
 
-## Test Cortex in isolation (no API key needed)
+The research harness is vendored, not pip-depended-on, specifically so the
+self-improvement engine can propose edits to it inside your own git
+history instead of a copy shared with anyone else. To get your own copy:
+
+```python
+from pathlib import Path
+from agents.research.scaffold import export_strategy
+
+export_strategy(Path("./my_research_harness"))
+```
+
+This writes a complete, self-sufficient copy (not just the editable files
+— see the module's docstring for why a partial copy doesn't work) plus a
+`README.md` explaining exactly what to edit, and a `benchmark_template.py`
+you need to fill in with your own domain's ground truth before RSI has
+anything meaningful to gate on. **Writing that benchmark is the single
+most important step** — see `docs/WRITING_YOUR_OWN_BENCHMARK.md`.
+
+Commit the exported directory to your own repo, build a `HarnessSpec`
+pointing at it (see `rsi.harness_spec.HarnessSpec` and
+`rsi.harnesses.RESEARCH_HARNESS` for the shape), and call `rsi.run_cycle()`
+— nothing in `rsi/proposer.py`, `probe.py`, or `composer.py` needs to
+change for a new consumer.
+
+## Testing
 
 ```bash
-python -m tests.test_cortex
+python -m tests.test_cortex   # no API key needed
 ```
 
-Covers: write-back + Recall, Intuition catching a structurally-similar but
-surface-dissimilar problem, groove reinforcement strengthening with repeated
-success, topic-scoped decay weakening unused edges, spreading activation
-decaying with hop distance, and Replay correctly merging a confirmed
-cluster vs. rejecting a false-positive one.
+## License
+
+Apache 2.0 (`LICENSE`). The vendored GPT Researcher tree under
+`agents/research/gpt_researcher/` keeps its own Apache 2.0 license —
+see `agents/research/VENDOR.md` for provenance.
+
+## Contributing
+
+See `CONTRIBUTING.md`.
