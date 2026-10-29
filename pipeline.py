@@ -48,9 +48,7 @@ def run_pipeline(task: str, scope: str = "default", workspace_dir: str = "./work
     workspace.mkdir(parents=True, exist_ok=True)
 
     store = CortexStore(persist_dir=cortex_dir)
-    graph_path = Path(cortex_dir) / "graph.json"
-    graph = MemoryGraph(persist_path=str(graph_path) if graph_path.exists() else None)
-    graph.persist_path = str(graph_path)
+    graph = MemoryGraph(persist_path=str(Path(cortex_dir) / "graph.sqlite3"))
 
     action_arc: list[ActionArcStep] = []
     cost = CostActual()

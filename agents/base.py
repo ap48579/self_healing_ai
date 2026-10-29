@@ -31,6 +31,7 @@ class AgentResult:
     output_tokens: int = 0
     thinking_tokens: int = 0
     dry_run: bool = False
+    sources: list[dict] = field(default_factory=list)  # [{"url": ..., "title": ...}] from server-side tool use
 
 
 class DryRunClient:
@@ -41,12 +42,14 @@ class DryRunClient:
         self.canned = canned_responses or {}
         self.call_log: list[dict] = []
 
-    def call(self, agent_name: str, system_prompt: str, user_message: str, effort: str | None) -> AgentResult:
+    def call(self, agent_name: str, system_prompt: str, user_message: str, effort: str | None,
+              tools: list[dict] | None = None) -> AgentResult:
         self.call_log.append({
             "agent": agent_name,
             "effort": effort,
             "system_prompt_len": len(system_prompt),
             "user_message_len": len(user_message),
+            "tools": [t.get("type") for t in (tools or [])],
         })
         text = self.canned.get(agent_name, f"[DRY RUN — no ANTHROPIC_API_KEY set. "
                                             f"{agent_name} would respond here based on:\n{user_message[:200]}...]")
@@ -58,11 +61,14 @@ class LiveClient:
         import anthropic
         self.client = anthropic.Anthropic()
 
-    def call(self, agent_name: str, system_prompt: str, user_message: str, effort: str | None) -> AgentResult:
+    def call(self, agent_name: str, system_prompt: str, user_message: str, effort: str | None,
+              tools: list[dict] | None = None) -> AgentResult:
         kwargs: dict = {}
         if effort is not None:
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["output_config"] = {"effort": effort}
+        if tools:
+            kwargs["tools"] = tools
 
         response = self.client.messages.create(
             model=MODEL,
@@ -72,12 +78,20 @@ class LiveClient:
             **kwargs,
         )
         text = "".join(b.text for b in response.content if b.type == "text")
+        sources = []
+        for block in response.content:
+            if block.type == "web_search_tool_result":
+                for item in getattr(block, "content", []) or []:
+                    url = getattr(item, "url", None)
+                    if url:
+                        sources.append({"url": url, "title": getattr(item, "title", "")})
         usage = response.usage
         return AgentResult(
             text=text,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             thinking_tokens=0,  # not separately reported by the API
+            sources=sources,
         )
 
 
@@ -92,8 +106,9 @@ class Agent:
     name: str
     system_prompt: str
     thinking_budget: str = "medium"  # none|low|medium|high|max
+    tools: list[dict] | None = None  # server-side tools, e.g. web_search_20250305
     client: object = field(default_factory=make_client)
 
     def run(self, user_message: str) -> AgentResult:
         effort = THINKING_BUDGET_TO_EFFORT[self.thinking_budget]
-        return self.client.call(self.name, self.system_prompt, user_message, effort)
+        return self.client.call(self.name, self.system_prompt, user_message, effort, tools=self.tools)

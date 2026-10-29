@@ -2,20 +2,49 @@
 
 Strength lives on edges, not nodes. Edge weight = "groove depth": strengthened
 by Hebbian co-activation + success, decayed by disuse (topic-scoped).
+
+Persistence is SQLite-backed (nodes/edges tables), not a single JSON blob.
+Every mutation (add_node/add_edge/reinforce/decay_all/prune) commits
+immediately, so a crash mid-mutation loses at most that one change instead
+of the whole graph — the previous design re-serialized the entire graph to
+one JSON file on every save(), which had no such guarantee. SQLite needs no
+server and ships with Python's standard library, so this adds no new infra
+dependency. The in-memory NetworkX graph is still what every algorithm here
+(reinforce, decay, spreading activation) actually operates on; SQLite is
+purely the persistence layer underneath it.
 """
 
 from __future__ import annotations
 
 import json
 import math
-import os
+import sqlite3
 import time
+from pathlib import Path
 from typing import Optional
 
 import networkx as nx
 
 DEFAULT_LAMBDA = 0.05  # decay rate per day, used when no topic-specific rate is set
 SECONDS_PER_DAY = 86400.0
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS nodes (
+    node_id TEXT PRIMARY KEY,
+    node_type TEXT NOT NULL,
+    attrs TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS edges (
+    source TEXT NOT NULL,
+    target TEXT NOT NULL,
+    edge_type TEXT NOT NULL,
+    weight REAL NOT NULL,
+    topic TEXT NOT NULL,
+    last_reinforced REAL NOT NULL,
+    lambda_topic REAL,
+    PRIMARY KEY (source, target, edge_type)
+);
+"""
 
 
 class MemoryGraph:
@@ -26,7 +55,13 @@ class MemoryGraph:
     def __init__(self, persist_path: Optional[str] = None):
         self.graph = nx.MultiDiGraph()
         self.persist_path = persist_path
-        if persist_path and os.path.exists(persist_path):
+        self._conn: Optional[sqlite3.Connection] = None
+        if persist_path:
+            Path(persist_path).parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(persist_path)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
             self.load()
 
     # ---- node / edge mutation ----
@@ -36,6 +71,7 @@ class MemoryGraph:
             self.graph.nodes[node_id].update(attrs)
         else:
             self.graph.add_node(node_id, node_type=node_type, **attrs)
+        self._persist_node(node_id)
 
     def add_edge(
         self,
@@ -54,6 +90,7 @@ class MemoryGraph:
             topic=topic,
             last_reinforced=time.time(),
         )
+        self._persist_edge(source, target, edge_type)
 
     def reinforce(
         self,
@@ -81,6 +118,7 @@ class MemoryGraph:
 
         data["weight"] = new_weight
         data["last_reinforced"] = time.time()
+        self._persist_edge(source, target, edge_type)
         return new_weight
 
     # ---- decay ----
@@ -110,6 +148,7 @@ class MemoryGraph:
             data["lambda_topic"] = lam
             if data["weight"] < 0.05:
                 prune_candidates += 1
+        self._persist_all_edges()
         return prune_candidates
 
     def prune(self, threshold: float = 0.05) -> list[tuple[str, str, str]]:
@@ -122,6 +161,11 @@ class MemoryGraph:
         ]
         for u, v, k in to_remove:
             self.graph.remove_edge(u, v, key=k)
+        if self._conn and to_remove:
+            self._conn.executemany(
+                "DELETE FROM edges WHERE source=? AND target=? AND edge_type=?", to_remove
+            )
+            self._conn.commit()
         return to_remove
 
     # ---- retrieval: spreading activation ----
@@ -159,21 +203,73 @@ class MemoryGraph:
             activation.pop(seed, None)
         return dict(sorted(activation.items(), key=lambda kv: kv[1], reverse=True))
 
-    # ---- persistence ----
+    # ---- persistence (SQLite) ----
+
+    def _persist_node(self, node_id: str) -> None:
+        if not self._conn:
+            return
+        data = dict(self.graph.nodes[node_id])
+        node_type = data.pop("node_type", "unknown")
+        self._conn.execute(
+            "INSERT OR REPLACE INTO nodes (node_id, node_type, attrs) VALUES (?, ?, ?)",
+            (node_id, node_type, json.dumps(data)),
+        )
+        self._conn.commit()
+
+    def _persist_edge(self, source: str, target: str, edge_type: str) -> None:
+        if not self._conn:
+            return
+        data = self.graph[source][target][edge_type]
+        self._conn.execute(
+            "INSERT OR REPLACE INTO edges "
+            "(source, target, edge_type, weight, topic, last_reinforced, lambda_topic) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (source, target, edge_type, data["weight"], data["topic"],
+             data["last_reinforced"], data.get("lambda_topic")),
+        )
+        self._conn.commit()
+
+    def _persist_all_edges(self) -> None:
+        """Batched version of _persist_edge for decay_all's full-sweep update
+        -- one transaction for every edge instead of one commit per edge."""
+        if not self._conn:
+            return
+        rows = [
+            (u, v, key, d["weight"], d["topic"], d["last_reinforced"], d.get("lambda_topic"))
+            for u, v, key, d in self.graph.edges(keys=True, data=True)
+        ]
+        self._conn.executemany(
+            "INSERT OR REPLACE INTO edges "
+            "(source, target, edge_type, weight, topic, last_reinforced, lambda_topic) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self._conn.commit()
 
     def save(self, path: Optional[str] = None) -> None:
-        path = path or self.persist_path
-        if not path:
-            raise ValueError("No persist_path configured")
-        data = nx.node_link_data(self.graph, edges="edges")
-        with open(path, "w") as f:
-            json.dump(data, f)
+        """No-op: every mutation already commits to SQLite immediately.
+        Kept only so existing call sites (e.g. pipeline.py's graph.save()
+        after write_back) don't need to change."""
 
     def load(self, path: Optional[str] = None) -> None:
-        path = path or self.persist_path
-        with open(path) as f:
-            data = json.load(f)
-        self.graph = nx.node_link_graph(data, edges="edges", multigraph=True, directed=True)
+        """Rebuilds the in-memory NetworkX graph by reading every row back
+        from SQLite. `path` is accepted for API compatibility but ignored
+        unless it differs from the connection already open in __init__."""
+        conn = self._conn
+        if path and path != self.persist_path:
+            conn = sqlite3.connect(path)
+        if conn is None:
+            return
+        self.graph = nx.MultiDiGraph()
+        for node_id, node_type, attrs_json in conn.execute("SELECT node_id, node_type, attrs FROM nodes"):
+            self.graph.add_node(node_id, node_type=node_type, **json.loads(attrs_json))
+        for source, target, edge_type, weight, topic, last_reinforced, lambda_topic in conn.execute(
+            "SELECT source, target, edge_type, weight, topic, last_reinforced, lambda_topic FROM edges"
+        ):
+            kwargs = {"weight": weight, "topic": topic, "last_reinforced": last_reinforced}
+            if lambda_topic is not None:
+                kwargs["lambda_topic"] = lambda_topic
+            self.graph.add_edge(source, target, key=edge_type, edge_type=edge_type, **kwargs)
 
     def stats(self) -> dict:
         weights = [d["weight"] for _, _, d in self.graph.edges(data=True)]
